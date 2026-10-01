@@ -227,3 +227,87 @@ def test_cancellation_after_child_closes_pipes(tmp_path, launched_processes):
     finally:
         watcher.join(timeout=6)
         assert not watcher.is_alive()
+
+
+def test_claude_json_adapter():
+    claude_payload = {
+        "result": "Defensive design proposal",
+        "modelUsage": {
+            "claude-sonnet-5-5": {
+                "inputTokens": 100,
+                "outputTokens": 50,
+                "costUSD": 0.005,
+            }
+        },
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+        "total_cost_usd": 0.005,
+        "session_id": "sess-abc-123",
+        "type": "result",
+    }
+    output, meta = command(
+        "import json; print(json.dumps(" + repr(claude_payload) + "))",
+        adapter="claude-json",
+        model="claude-sonnet-5-5",
+    ).generate("test prompt")
+    assert output == "Defensive design proposal"
+    assert meta.model == "claude-sonnet-5-5"
+    assert meta.actual_provider == "claude"
+    assert meta.adapter == "claude-json"
+    assert meta.usage == {"input_tokens": 100, "output_tokens": 50}
+    assert meta.cost == 0.005
+    assert meta.request_id == "sess-abc-123"
+    assert meta.inference_occurred is True
+
+
+def test_claude_json_adapter_error():
+    error_payload = {
+        "is_error": True,
+        "subtype": "error",
+        "error": "rate limit exceeded",
+    }
+    with pytest.raises(ProviderError, match="Claude CLI error"):
+        command(
+            "import json; print(json.dumps(" + repr(error_payload) + "))",
+            adapter="claude-json",
+        ).generate("test")
+
+
+def test_openai_json_adapter():
+    openai_payload = {
+        "id": "chatcmpl-999",
+        "model": "gpt-4o",
+        "choices": [{"message": {"role": "assistant", "content": "OpenAI generated text"}}],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 30, "total_tokens": 50},
+    }
+    output, meta = command(
+        "import json; print(json.dumps(" + repr(openai_payload) + "))",
+        adapter="openai-json",
+    ).generate("test")
+    assert output == "OpenAI generated text"
+    assert meta.model == "gpt-4o"
+    assert meta.actual_provider == "openai"
+    assert meta.adapter == "openai-json"
+    assert meta.request_id == "chatcmpl-999"
+    assert meta.usage == {"prompt_tokens": 20, "completion_tokens": 30, "total_tokens": 50}
+
+
+def test_gemini_json_adapter():
+    gemini_payload = {
+        "candidates": [{"content": {"parts": [{"text": "Gemini generated text"}]}}],
+        "modelVersion": "gemini-2.0-flash",
+        "usageMetadata": {"promptTokenCount": 15, "candidatesTokenCount": 25},
+    }
+    output, meta = command(
+        "import json; print(json.dumps(" + repr(gemini_payload) + "))",
+        adapter="gemini-json",
+    ).generate("test")
+    assert output == "Gemini generated text"
+    assert meta.model == "gemini-2.0-flash"
+    assert meta.actual_provider == "gemini"
+    assert meta.adapter == "gemini-json"
+    assert meta.usage == {"promptTokenCount": 15, "candidatesTokenCount": 25}
+
+
+def test_unsupported_adapter_rejected():
+    with pytest.raises(ProviderError, match="supported format"):
+        CommandConfig((sys.executable, "-c", "pass"), True, adapter="unsupported-adapter")
