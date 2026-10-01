@@ -151,6 +151,7 @@ class Execution:
     elapsed_seconds: float = 0.0
     usage: dict | None = None
     cost: float | None = None
+    request_id: str | None = None
 
     def __post_init__(self):
         for value in (self.inference_occurred, self.remote):
@@ -160,9 +161,158 @@ class Execution:
             raise ProviderError("invalid deterministic/mock metadata")
         if self.model is not None and not isinstance(self.model, str):
             raise ProviderError("invalid model metadata")
+        if self.cost is not None and not isinstance(self.cost, (int, float)):
+            raise ProviderError("invalid cost metadata")
 
     def to_dict(self):
         return asdict(self)
+
+
+class CLIResultAdapter:
+    """Base class for decoding CLI subprocess output."""
+
+    def decode(self, raw_output: str) -> tuple[str, dict]:
+        raise NotImplementedError()
+
+
+class RawTextAdapter(CLIResultAdapter):
+    def decode(self, raw_output: str) -> tuple[str, dict]:
+        if not raw_output.strip():
+            raise ProviderError("command returned empty output")
+        return raw_output, {}
+
+
+class GenericJSONAdapter(CLIResultAdapter):
+    def decode(self, raw_output: str) -> tuple[str, dict]:
+        try:
+            reported = json.loads(raw_output)
+            if not isinstance(reported, dict) or not isinstance(reported.get("text"), str):
+                raise TypeError()
+            output = reported["text"]
+            if not output.strip():
+                raise ValueError()
+            for key in ("model", "provider"):
+                if reported.get(key) is not None and not isinstance(reported[key], str):
+                    raise ValueError()
+            if reported.get("usage") is not None and not isinstance(reported["usage"], dict):
+                raise ValueError()
+            for key in ("deterministic", "mocked", "inference_occurred"):
+                if reported.get(key) is not None and type(reported[key]) is not bool:
+                    raise ValueError()
+            return output, reported
+        except (ValueError, TypeError, json.JSONDecodeError):
+            raise ProviderError("malformed command JSON response") from None
+
+
+class ClaudeJSONAdapter(CLIResultAdapter):
+    """Decodes Claude CLI JSON responses (--output-format json)."""
+
+    def decode(self, raw_output: str) -> tuple[str, dict]:
+        try:
+            data = json.loads(raw_output)
+            if not isinstance(data, dict):
+                raise TypeError()
+            if data.get("is_error") is True or data.get("subtype") == "error":
+                raise ProviderError(f"Claude CLI error: {data.get('error', 'unknown error')}")
+            text = data.get("result")
+            if text is None:
+                text = data.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError()
+            model = None
+            if isinstance(data.get("modelUsage"), dict) and data["modelUsage"]:
+                model = next(iter(data["modelUsage"].keys()))
+            elif isinstance(data.get("model"), str):
+                model = data["model"]
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+            cost = data.get("total_cost_usd")
+            if cost is not None and not isinstance(cost, (int, float)):
+                cost = None
+            req_id = data.get("session_id") or data.get("uuid")
+            return text, {
+                "model": model,
+                "provider": "claude",
+                "usage": usage,
+                "cost": float(cost) if cost is not None else None,
+                "request_id": str(req_id) if req_id else None,
+                "inference_occurred": True,
+            }
+        except ProviderError:
+            raise
+        except (ValueError, TypeError, json.JSONDecodeError):
+            raise ProviderError("malformed Claude JSON response") from None
+
+
+class OpenAIJSONAdapter(CLIResultAdapter):
+    """Decodes OpenAI / Codex CLI responses."""
+
+    def decode(self, raw_output: str) -> tuple[str, dict]:
+        try:
+            data = json.loads(raw_output)
+            if not isinstance(data, dict):
+                raise TypeError()
+            choices = data.get("choices")
+            if isinstance(choices, list) and choices:
+                msg = choices[0].get("message", {})
+                text = msg.get("content") or choices[0].get("text")
+            else:
+                text = data.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError()
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+            return text, {
+                "model": data.get("model"),
+                "provider": "openai",
+                "usage": usage,
+                "request_id": data.get("id"),
+                "inference_occurred": True,
+            }
+        except ProviderError:
+            raise
+        except (ValueError, TypeError, json.JSONDecodeError):
+            raise ProviderError("malformed OpenAI/Codex JSON response") from None
+
+
+class GeminiJSONAdapter(CLIResultAdapter):
+    """Decodes Gemini CLI responses."""
+
+    def decode(self, raw_output: str) -> tuple[str, dict]:
+        try:
+            data = json.loads(raw_output)
+            if not isinstance(data, dict):
+                raise TypeError()
+            candidates = data.get("candidates")
+            if isinstance(candidates, list) and candidates:
+                content = candidates[0].get("content", {})
+                parts = content.get("parts", [])
+                text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+            else:
+                text = data.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError()
+            raw_meta = data.get("usageMetadata")
+            usage = raw_meta if isinstance(raw_meta, dict) else None
+            return text, {
+                "model": data.get("modelVersion") or data.get("model"),
+                "provider": "gemini",
+                "usage": usage,
+                "inference_occurred": True,
+            }
+        except ProviderError:
+            raise
+        except (ValueError, TypeError, json.JSONDecodeError):
+            raise ProviderError("malformed Gemini JSON response") from None
+
+
+ADAPTERS: dict[str, type[CLIResultAdapter]] = {
+    "text": RawTextAdapter,
+    "raw-text": RawTextAdapter,
+    "json": GenericJSONAdapter,
+    "generic-json": GenericJSONAdapter,
+    "claude-json": ClaudeJSONAdapter,
+    "openai-json": OpenAIJSONAdapter,
+    "gemini-json": GeminiJSONAdapter,
+}
 
 
 @dataclass
@@ -193,6 +343,7 @@ class CommandConfig:
     max_output_bytes: int = 2 * 1024 * 1024
     model: str | None = None
     output_format: str = "text"
+    adapter: str | None = None
 
     def __post_init__(self):
         if not self.argv or any(not isinstance(arg, str) or "\0" in arg for arg in self.argv):
@@ -201,8 +352,9 @@ class CommandConfig:
             raise ProviderError("command requires operator-declared remote execution")
         if not 0 < self.timeout_seconds <= 600 or not 0 < self.max_output_bytes <= 2 * 1024 * 1024:
             raise ProviderError("command timeout/output limit out of range")
-        if self.output_format not in {"text", "json"}:
-            raise ProviderError("command output_format must be text or json")
+        fmt = self.adapter or self.output_format
+        if fmt not in ADAPTERS:
+            raise ProviderError("command output_format / adapter must be a supported format")
         name = Path(self.argv[0]).name.lower()
         if name in {
             "sh",
@@ -370,30 +522,14 @@ class CommandProvider:
                 marker in key.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")
             ):
                 output = output.replace(value, "[REDACTED]")
-        reported = {}
-        if config.output_format == "json":
-            try:
-                reported = json.loads(output)
-                if not isinstance(reported, dict) or not isinstance(reported.get("text"), str):
-                    raise TypeError()
-                output = reported["text"]
-                if not output.strip():
-                    raise ValueError()
-                for key in ("model", "provider"):
-                    if reported.get(key) is not None and not isinstance(reported[key], str):
-                        raise ValueError()
-                if reported.get("usage") is not None and not isinstance(reported["usage"], dict):
-                    raise ValueError()
-                for key in ("deterministic", "mocked", "inference_occurred"):
-                    if reported.get(key) is not None and type(reported[key]) is not bool:
-                        raise ValueError()
-            except (ValueError, TypeError):
-                raise ProviderError("malformed command JSON response") from None
+        adapter_name = config.adapter or config.output_format
+        adapter_cls = ADAPTERS[adapter_name]
+        output, reported = adapter_cls().decode(output)
         return output, Execution(
             "command",
             "command",
             reported.get("provider") or "command",
-            "command",
+            adapter_name,
             model=reported.get("model"),
             requested_model=config.model,
             remote=True,
@@ -402,5 +538,7 @@ class CommandProvider:
             mocked=reported.get("mocked", False),
             inference_occurred=reported.get("inference_occurred"),
             usage=reported.get("usage"),
+            cost=reported.get("cost"),
+            request_id=reported.get("request_id"),
             elapsed_seconds=time.monotonic() - started,
         )

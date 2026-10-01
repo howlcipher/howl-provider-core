@@ -22,3 +22,8 @@ target-version = "py311"
 
 [tool.setuptools.package-data]
 howl_provider_core = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
