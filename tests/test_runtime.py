@@ -1,6 +1,8 @@
 import socket
+import subprocess
 import sys
 import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -65,6 +67,20 @@ def command(code, **kwargs):
     return CommandProvider(CommandConfig((sys.executable, "-c", code), True, **kwargs))
 
 
+@pytest.fixture
+def launched_processes(monkeypatch):
+    processes = []
+    launch = subprocess.Popen
+
+    def capture(*args, **kwargs):
+        process = launch(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", capture)
+    return processes
+
+
 def test_literal_stdin_and_environment(monkeypatch):
     monkeypatch.setenv("SECRET_UNRELATED", "secret-value")
     provider = command(
@@ -80,16 +96,36 @@ def test_literal_stdin_and_environment(monkeypatch):
     "code,message",
     [
         ('import sys; print("secret",file=sys.stderr); sys.exit(4)', "exit code 4"),
-        ("import time; time.sleep(2)", "timed out"),
         ('print("x"*1000)', "output limit"),
         ("pass", "empty output"),
     ],
 )
 def test_failures_sanitized(code, message):
-    provider = command(code, timeout_seconds=0.2, max_output_bytes=100)
+    # Semantic failures must allow ordinary interpreter startup on slower hosts.
+    provider = command(code, timeout_seconds=2, max_output_bytes=100)
     with pytest.raises(ProviderError, match=message) as error:
         provider.generate("test")
     assert "secret" not in str(error.value)
+
+
+def test_timeout_after_child_started(tmp_path, launched_processes):
+    marker = tmp_path / "started"
+    code = f"import pathlib,time; pathlib.Path({str(marker)!r}).touch(); time.sleep(30)"
+    started = time.monotonic()
+    with pytest.raises(ProviderError, match="timed out"):
+        command(code, timeout_seconds=2).generate("test")
+    assert marker.exists(), "child must start before timeout enforcement is credited"
+    assert 2 <= time.monotonic() - started < 6
+    assert len(launched_processes) == 1
+    assert launched_processes[0].returncode is not None
+
+
+@pytest.mark.parametrize("payload", ["{", "{}", '{"text":"answer","usage":42}'])
+def test_malformed_command_json(payload):
+    with pytest.raises(ProviderError, match="malformed command JSON response"):
+        command("print(" + repr(payload) + ")", output_format="json", timeout_seconds=2).generate(
+            "test"
+        )
 
 
 def test_cancellation():
@@ -140,10 +176,9 @@ def test_reported_model_distinct_from_requested():
     assert text_metadata.inference_occurred is None
 
 
-def test_descendant_terminated(tmp_path):
+def test_descendant_terminated(tmp_path, launched_processes):
     import os
     import pathlib
-    import time
 
     pid_file = tmp_path / "child.pid"
     code = (
@@ -152,7 +187,10 @@ def test_descendant_terminated(tmp_path):
         f'open({str(pid_file)!r},"w").write(str(child.pid)); time.sleep(30)'
     )
     with pytest.raises(ProviderError, match="timed out"):
-        command(code, timeout_seconds=0.3).generate("test")
+        command(code, timeout_seconds=2).generate("test")
+    assert pid_file.exists(), "descendant must be launched before checking cleanup"
+    assert len(launched_processes) == 1
+    assert launched_processes[0].returncode is not None
     pid = int(pid_file.read_text())
     for _ in range(20):
         status = pathlib.Path(f"/proc/{pid}/stat")
@@ -164,14 +202,28 @@ def test_descendant_terminated(tmp_path):
         pytest.fail("descendant was still running after timeout")
 
 
-def test_cancellation_after_child_closes_pipes():
+def test_cancellation_after_child_closes_pipes(tmp_path, launched_processes):
     cancellation = threading.Event()
-    timer = threading.Timer(0.2, cancellation.set)
-    timer.start()
+    marker = tmp_path / "pipes_closed"
+
+    def cancel_when_ready():
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        cancellation.set()
+
+    watcher = threading.Thread(target=cancel_when_ready)
+    watcher.start()
     try:
         with pytest.raises(ProviderError, match="cancelled"):
             command(
-                "import os,time; os.close(0); os.close(1); os.close(2); time.sleep(5)"
+                "import os,pathlib,time; os.close(0); os.close(1); os.close(2); "
+                f"pathlib.Path({str(marker)!r}).touch(); time.sleep(30)",
+                timeout_seconds=10,
             ).generate("test", cancellation)
+        assert marker.exists(), "cancellation must happen after the child closes its pipes"
+        assert len(launched_processes) == 1
+        assert launched_processes[0].returncode is not None
     finally:
-        timer.cancel()
+        watcher.join(timeout=6)
+        assert not watcher.is_alive()

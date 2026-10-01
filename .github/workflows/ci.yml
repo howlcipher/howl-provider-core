@@ -2,6 +2,8 @@ name: CI
 on: [push, pull_request]
 permissions:
   contents: read
+env:
+  HOWL_FORBID_LOCAL_INFERENCE: '1'
 jobs:
   verify:
     runs-on: ubuntu-latest

@@ -59,3 +59,5 @@ python -m build
 ```
 
 Tests use fake commands and mock sockets. They do not require any model service.
+Semantic command tests allow two seconds for process startup. Focused timeout and
+cancellation tests require child readiness markers and check process cleanup.
