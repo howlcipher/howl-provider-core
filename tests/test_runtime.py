@@ -276,9 +276,7 @@ def test_openai_json_adapter():
     openai_payload = {
         "id": "chatcmpl-999",
         "model": "gpt-4o",
-        "choices": [
-            {"message": {"role": "assistant", "content": "OpenAI generated text"}}
-        ],
+        "choices": [{"message": {"role": "assistant", "content": "OpenAI generated text"}}],
         "usage": {"prompt_tokens": 20, "completion_tokens": 30, "total_tokens": 50},
     }
     output, meta = command(
@@ -295,9 +293,7 @@ def test_openai_json_adapter():
 
 def test_gemini_json_adapter():
     gemini_payload = {
-        "candidates": [
-            {"content": {"parts": [{"text": "Gemini generated text"}]}}
-        ],
+        "candidates": [{"content": {"parts": [{"text": "Gemini generated text"}]}}],
         "modelVersion": "gemini-2.0-flash",
         "usageMetadata": {"promptTokenCount": 15, "candidatesTokenCount": 25},
     }
