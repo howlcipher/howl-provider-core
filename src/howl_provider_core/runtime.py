@@ -5,7 +5,9 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import json
+import math
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -21,7 +23,125 @@ from urllib.parse import urlsplit
 
 
 class ProviderError(ValueError):
-    """Sanitized provider failure; never includes a server or subprocess body."""
+    """Sanitized failure carrying an optional execution record and recovery policy."""
+
+    def __init__(self, message, *, failure=None, execution=None):
+        super().__init__(message)
+        self.failure = failure or classify_failure(message)
+        self.execution = execution
+
+
+def classify_failure(text: str, *, exit_code=None) -> dict:
+    """Classify bounded transient input, retaining only allowlisted static messages."""
+    lower = text[:65536].lower()
+    rules = (
+        (
+            "SESSION_LIMIT",
+            ("session limit", "session quota"),
+            "HUMAN_ACTION",
+            "session limit reached",
+        ),
+        ("RATE_LIMIT", ("rate limit", "429"), "RETRYABLE", "rate limit reached"),
+        (
+            "AUTHENTICATION",
+            ("api key", "unauthorized", "authentication", "401"),
+            "NON_RETRYABLE",
+            "authentication failed",
+        ),
+        (
+            "CONTEXT_LIMIT",
+            ("context limit", "context length", "token limit"),
+            "NON_RETRYABLE",
+            "context limit reached",
+        ),
+        ("TIMEOUT", ("timed out", "timeout"), "RETRYABLE", "command timed out"),
+        ("CANCELLED", ("cancelled", "canceled"), "NON_RETRYABLE", "command cancelled"),
+        (
+            "PROVIDER_UNAVAILABLE",
+            ("unavailable", "503", "overloaded"),
+            "RETRYABLE",
+            "provider unavailable",
+        ),
+        (
+            "MALFORMED_RESPONSE",
+            ("malformed", "empty output", "utf-8"),
+            "REPAIRABLE",
+            "malformed provider response",
+        ),
+        ("BUDGET_EXHAUSTED", ("budget_exhausted",), "NON_RETRYABLE", "BUDGET_EXHAUSTED"),
+    )
+    for category, markers, recovery, message in rules:
+        if any(marker in lower for marker in markers):
+            break
+    else:
+        category, recovery, message = "PROCESS_FAILURE", "NON_RETRYABLE", "provider process failed"
+    return {
+        "category": category,
+        "recovery": recovery,
+        "retryable": recovery == "RETRYABLE",
+        "exit_code": exit_code,
+        "sanitized_message": message,
+    }
+
+
+def reported_metadata(raw: str, adapter: str) -> dict:
+    """Keep known metadata even when the completion field is invalid; no body retention."""
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError, RecursionError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    provider = {"claude-json": "claude", "openai-json": "openai", "gemini-json": "gemini"}.get(
+        adapter
+    ) or data.get("provider")
+    model = data.get("model") or data.get("modelVersion")
+    if adapter == "claude-json" and isinstance(data.get("modelUsage"), dict):
+        model = next(iter(data["modelUsage"]), model)
+    usage = data.get("usage") or data.get("usageMetadata")
+
+    def numeric(value):
+        if isinstance(value, dict):
+            return {
+                k: numeric(v)
+                for k, v in value.items()
+                if isinstance(k, str)
+                and re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]{0,63}", k)
+                and not any(
+                    marker in k.lower()
+                    for marker in ("secret", "password", "api_key", "authorization")
+                )
+                and (
+                    isinstance(v, dict) or (type(v) in {int, float} and math.isfinite(v) and v >= 0)
+                )
+            }
+        return value
+
+    cost = data.get("total_cost_usd", data.get("cost"))
+    request_id = data.get("session_id") or data.get("id") or data.get("request_id")
+    inference = data.get("inference_occurred")
+    if (
+        inference is None
+        and isinstance(usage, dict)
+        and any(type(v) in {int, float} and v > 0 for v in numeric(usage).values())
+    ):
+        inference = True
+
+    def identity(value):
+        return (
+            value
+            if isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_./:-]{1,200}", value)
+            else None
+        )
+
+    return {
+        "provider": identity(provider),
+        "model": identity(model),
+        "usage": numeric(usage) if isinstance(usage, dict) else None,
+        "cost": cost if type(cost) in {int, float} and math.isfinite(cost) and cost >= 0 else None,
+        "request_id": identity(request_id),
+        "inference_occurred": inference if type(inference) is bool else None,
+    }
 
 
 class BudgetExceeded(ProviderError):
@@ -152,6 +272,10 @@ class Execution:
     usage: dict | None = None
     cost: float | None = None
     request_id: str | None = None
+    raw_output_received: bool = False
+    parse_status: str = "NOT_PARSED"
+    repair_attempted: bool = False
+    sampling: dict | None = None
 
     def __post_init__(self):
         for value in (self.inference_occurred, self.remote):
@@ -200,7 +324,7 @@ class GenericJSONAdapter(CLIResultAdapter):
                 if reported.get(key) is not None and type(reported[key]) is not bool:
                     raise ValueError()
             return output, reported
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError, AttributeError, IndexError, RecursionError):
             raise ProviderError("malformed command JSON response") from None
 
 
@@ -213,7 +337,10 @@ class ClaudeJSONAdapter(CLIResultAdapter):
             if not isinstance(data, dict):
                 raise TypeError()
             if data.get("is_error") is True or data.get("subtype") == "error":
-                raise ProviderError(f"Claude CLI error: {data.get('error', 'unknown error')}")
+                failure = classify_failure(str(data.get("error") or data.get("result") or ""))
+                raise ProviderError(
+                    "Claude CLI error: " + failure["sanitized_message"], failure=failure
+                )
             text = data.get("result")
             if text is None:
                 text = data.get("text")
@@ -239,7 +366,7 @@ class ClaudeJSONAdapter(CLIResultAdapter):
             }
         except ProviderError:
             raise
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError, AttributeError, IndexError, RecursionError):
             raise ProviderError("malformed Claude JSON response") from None
 
 
@@ -269,7 +396,7 @@ class OpenAIJSONAdapter(CLIResultAdapter):
             }
         except ProviderError:
             raise
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError, AttributeError, IndexError, RecursionError):
             raise ProviderError("malformed OpenAI/Codex JSON response") from None
 
 
@@ -300,7 +427,7 @@ class GeminiJSONAdapter(CLIResultAdapter):
             }
         except ProviderError:
             raise
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError, AttributeError, IndexError, RecursionError):
             raise ProviderError("malformed Gemini JSON response") from None
 
 
@@ -323,7 +450,12 @@ class CallBudget:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self):
-        if type(self.max_calls) is not int or self.max_calls < 0:
+        if (
+            type(self.max_calls) is not int
+            or self.max_calls < 0
+            or type(self.calls) is not int
+            or not 0 <= self.calls <= self.max_calls
+        ):
             raise ProviderError("max_calls must be a nonnegative integer")
 
     def consume(self, provider: str):
@@ -507,13 +639,48 @@ class CommandProvider:
                         except subprocess.TimeoutExpired:
                             pass
                 if process.returncode != 0:
-                    raise ProviderError(f"command failed with exit code {process.returncode}")
+                    failure = classify_failure(
+                        buffers["stdout"].decode("utf-8", errors="replace")
+                        + buffers["stderr"].decode("utf-8", errors="replace"),
+                        exit_code=process.returncode,
+                    )
+                    raise ProviderError(
+                        f"command failed with exit code {process.returncode}: "
+                        + failure["sanitized_message"],
+                        failure=failure,
+                    )
                 try:
                     output = buffers["stdout"].decode("utf-8")
                 except UnicodeDecodeError:
                     raise ProviderError("command output is not UTF-8") from None
                 if not output.strip():
                     raise ProviderError("command returned empty output")
+            except ProviderError as error:
+                meta = reported_metadata(
+                    buffers["stdout"].decode("utf-8", errors="replace"),
+                    config.adapter or config.output_format,
+                )
+                error.execution = Execution(
+                    "command",
+                    "command",
+                    meta.get("provider") or "command",
+                    config.adapter or config.output_format,
+                    model=meta.get("model"),
+                    requested_model=config.model,
+                    remote=True,
+                    remote_observation="OPERATOR_DECLARED",
+                    elapsed_seconds=time.monotonic() - started,
+                    usage=meta.get("usage"),
+                    cost=meta.get("cost"),
+                    request_id=meta.get("request_id"),
+                    inference_occurred=meta.get("inference_occurred"),
+                    raw_output_received=bool(buffers["stdout"]),
+                    parse_status="FAILED",
+                ).to_dict()
+                error.failure.update(
+                    provider=error.execution["actual_provider"], model=error.execution["model"]
+                )
+                raise
             finally:
                 self._terminate(process)
         # Never persist explicitly passed credentials echoed by a subprocess.
@@ -524,7 +691,37 @@ class CommandProvider:
                 output = output.replace(value, "[REDACTED]")
         adapter_name = config.adapter or config.output_format
         adapter_cls = ADAPTERS[adapter_name]
-        output, reported = adapter_cls().decode(output)
+        raw = output
+        try:
+            output, reported = adapter_cls().decode(raw)
+        except ProviderError as error:
+            meta = reported_metadata(raw, adapter_name)
+            error.execution = Execution(
+                "command",
+                "command",
+                meta.get("provider") or "command",
+                adapter_name,
+                model=meta.get("model"),
+                requested_model=config.model,
+                remote=True,
+                remote_observation="OPERATOR_DECLARED",
+                elapsed_seconds=time.monotonic() - started,
+                usage=meta.get("usage"),
+                cost=meta.get("cost"),
+                request_id=meta.get("request_id"),
+                inference_occurred=meta.get("inference_occurred"),
+                raw_output_received=True,
+                parse_status="FAILED",
+            ).to_dict()
+            error.failure.update(
+                provider=error.execution["actual_provider"], model=meta.get("model")
+            )
+            raise
+        safe_meta = reported_metadata(raw, adapter_name)
+        for key in ("model", "usage", "cost", "request_id"):
+            reported[key] = safe_meta.get(key)
+        if safe_meta.get("provider"):
+            reported["provider"] = safe_meta["provider"]
         return output, Execution(
             "command",
             "command",
@@ -541,4 +738,6 @@ class CommandProvider:
             cost=reported.get("cost"),
             request_id=reported.get("request_id"),
             elapsed_seconds=time.monotonic() - started,
+            raw_output_received=True,
+            parse_status="VALID",
         )

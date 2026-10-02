@@ -8,7 +8,9 @@ from .runtime import (
     Execution,
     Policy,
     ProviderError,
+    classify_failure,
     guarded_opener,
+    reported_metadata,
 )
 
 __all__ = [
@@ -19,5 +21,7 @@ __all__ = [
     "Execution",
     "Policy",
     "ProviderError",
+    "classify_failure",
     "guarded_opener",
+    "reported_metadata",
 ]

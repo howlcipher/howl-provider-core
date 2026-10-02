@@ -61,3 +61,33 @@ python -m build
 Tests use fake commands and mock sockets. They do not require any model service.
 Semantic command tests allow two seconds for process startup. Focused timeout and
 cancellation tests require child readiness markers and check process cleanup.
+
+## Structured adapters and failures
+
+`adapter` (or `output_format`) accepts `text`/`raw-text`, `json`/`generic-json`,
+`claude-json`, `openai-json`, and `gemini-json`. Use the CLI's matching JSON output
+flag. `openai-json` decodes a single OpenAI completion object or `{text: ...}`;
+it does not decode Codex JSONL event streams. `claude-json` reads `modelUsage`,
+`usage`, `total_cost_usd`, and session identity. Configured model labels are
+requested identity; missing observed model remains unknown. Generic JSON can
+supply `cost` and `request_id`; no pricing estimate is made.
+
+`ProviderError.failure` is a static-message envelope with `category`, `recovery`,
+`retryable`, and `exit_code`. Categories: RATE_LIMIT, SESSION_LIMIT,
+AUTHENTICATION, PROVIDER_UNAVAILABLE, CONTEXT_LIMIT, MALFORMED_RESPONSE, TIMEOUT,
+CANCELLED, PROCESS_FAILURE, BUDGET_EXHAUSTED. Recovery is RETRYABLE,
+NON_RETRYABLE, HUMAN_ACTION, or REPAIRABLE. Classification uses bounded provider
+text in memory, then discards that text. Unknown failures stay PROCESS_FAILURE;
+no provider body is copied into the message. `ProviderError.execution` retains
+known numeric usage/cost, model, request identity, elapsed time, and parse state,
+including when decoding fails. Missing telemetry remains null. Positive reported
+usage establishes inference occurred; absent usage does not prove no inference.
+
+The transport performs no automatic retries. Callers must use a shared budget
+for repairs or authorized fallback. Authentication, session limits, cancellation,
+and exhausted budgets require an explicit next action. Command providers do not
+apply sampling parameters; a profile model label is not evidence of model selection.
+Timeout remains 120 seconds, configurable per reviewed profile up to 600 seconds;
+use 300 seconds for a slow remote CLI only when appropriate to that provider.
+
+Invalid nested completion shapes are reported as malformed responses while retaining known usage.
