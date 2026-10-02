@@ -88,7 +88,7 @@ def reported_metadata(raw: str, adapter: str) -> dict:
     """Keep known metadata even when the completion field is invalid; no body retention."""
     try:
         data = json.loads(raw)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return {}
     if not isinstance(data, dict):
         return {}
@@ -324,7 +324,7 @@ class GenericJSONAdapter(CLIResultAdapter):
                 if reported.get(key) is not None and type(reported[key]) is not bool:
                     raise ValueError()
             return output, reported
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError, AttributeError, IndexError, RecursionError):
             raise ProviderError("malformed command JSON response") from None
 
 
@@ -366,7 +366,7 @@ class ClaudeJSONAdapter(CLIResultAdapter):
             }
         except ProviderError:
             raise
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError, AttributeError, IndexError, RecursionError):
             raise ProviderError("malformed Claude JSON response") from None
 
 
@@ -396,7 +396,7 @@ class OpenAIJSONAdapter(CLIResultAdapter):
             }
         except ProviderError:
             raise
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError, AttributeError, IndexError, RecursionError):
             raise ProviderError("malformed OpenAI/Codex JSON response") from None
 
 
@@ -427,7 +427,7 @@ class GeminiJSONAdapter(CLIResultAdapter):
             }
         except ProviderError:
             raise
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError, AttributeError, IndexError, RecursionError):
             raise ProviderError("malformed Gemini JSON response") from None
 
 

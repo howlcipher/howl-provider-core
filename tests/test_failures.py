@@ -76,3 +76,28 @@ def test_timeout_and_cancel_envelopes(cancel):
         command("import time; time.sleep(3)", timeout_seconds=0.1).generate("fixture", event)
     assert caught.value.failure["category"] == ("CANCELLED" if cancel else "TIMEOUT")
     assert caught.value.execution["elapsed_seconds"] >= 0
+
+
+@pytest.mark.parametrize(
+    "adapter,payload",
+    [
+        ("openai-json", {"choices": [None], "model": "fixture", "usage": {"prompt_tokens": 12}}),
+        (
+            "gemini-json",
+            {
+                "candidates": [{"content": None}],
+                "modelVersion": "fixture",
+                "usageMetadata": {"promptTokenCount": 12},
+            },
+        ),
+    ],
+)
+def test_invalid_nested_adapter_shape_preserves_usage(adapter, payload):
+    with pytest.raises(ProviderError) as caught:
+        command("import json; print(json.dumps(" + repr(payload) + "))", adapter=adapter).generate(
+            "fixture"
+        )
+    assert caught.value.failure["category"] == "MALFORMED_RESPONSE"
+    assert caught.value.execution["model"] == "fixture"
+    assert 12 in caught.value.execution["usage"].values()
+    assert caught.value.execution["parse_status"] == "FAILED"

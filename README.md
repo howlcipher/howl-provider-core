@@ -89,3 +89,5 @@ and exhausted budgets require an explicit next action. Command providers do not
 apply sampling parameters; a profile model label is not evidence of model selection.
 Timeout remains 120 seconds, configurable per reviewed profile up to 600 seconds;
 use 300 seconds for a slow remote CLI only when appropriate to that provider.
+
+Invalid nested completion shapes are reported as malformed responses while retaining known usage.

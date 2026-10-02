@@ -18,3 +18,5 @@ finite attempt accounting. No provider service discovery or local model executio
 - Preserved known usage/cost/model/request telemetry when adapter parsing fails.
 - Added raw-output/parse-state metadata and stricter numeric/identity filtering.
 - Retained restrictive local policy, bounded processes, no automatic transport retries.
+
+- Invalid nested OpenAI/Gemini completion shapes retain failure telemetry instead of leaking parser exceptions.
