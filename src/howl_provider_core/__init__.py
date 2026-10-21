@@ -1,5 +1,6 @@
 """Small, provider-neutral execution boundary. No discovery or service launching."""
 
+from .redaction import REDACTED, SECRET_PATTERNS, redact, scrub, secret_env_values
 from .runtime import (
     BudgetExceeded,
     CallBudget,
@@ -14,6 +15,8 @@ from .runtime import (
 )
 
 __all__ = [
+    "REDACTED",
+    "SECRET_PATTERNS",
     "BudgetExceeded",
     "CallBudget",
     "CommandConfig",
@@ -23,5 +26,8 @@ __all__ = [
     "ProviderError",
     "classify_failure",
     "guarded_opener",
+    "redact",
     "reported_metadata",
+    "scrub",
+    "secret_env_values",
 ]
