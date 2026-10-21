@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+Mission 007 F2: restore optional bearer prefixes for all credential assignments
+and hyphenated GitHub tokens. Add historical Writer Google, Slack, JWT and
+standalone bearer patterns. Scrub decoded command output and reported metadata
+before consumer persistence, including failure telemetry. Synthetic regressions
+cover all adapters, downstream receipts, logs and errors.
+
+
 0.2.0: one set of secret-redaction rules for every component that persists text
 (issue #4). `redact(text, secrets=())`, `scrub(value, secrets=())` and
 `secret_env_values(environ)` are public; the patterns are the union of the
