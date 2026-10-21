@@ -141,3 +141,26 @@ def test_ordinary_completion_bytes_are_preserved():
     payload = '{"ordinary": [1, 2], "text": "preserved"}'
     output, _ = command("print(" + repr(payload) + ")").generate("fixture")
     assert output == payload + "\n"
+
+
+def test_unvalidated_provider_identity_is_not_returned():
+    credential = "syntheticIdentityCredential456"
+    payload = {"text": "ordinary", "provider": "token: bearer " + credential}
+    output, execution = command(
+        "print(" + repr(json.dumps(payload)) + ")", adapter="json"
+    ).generate("fixture")
+    assert output == "ordinary"
+    assert credential not in json.dumps(execution.to_dict())
+    assert execution.actual_provider == "command"
+
+
+def test_known_literal_does_not_corrupt_json_numbers(monkeypatch):
+    monkeypatch.setenv("SYNTHETIC_TOKEN", "123456")
+    payload = {"text": "ordinary", "usage": {"output_tokens": 123456}}
+    output, execution = command(
+        "print(" + repr(json.dumps(payload)) + ")",
+        adapter="json",
+        env_allowlist=("SYNTHETIC_TOKEN",),
+    ).generate("fixture")
+    assert output == "ordinary"
+    assert execution.usage == {"output_tokens": 123456}

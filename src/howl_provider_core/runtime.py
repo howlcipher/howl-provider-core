@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .redaction import REDACTED, redact, scrub, secret_env_values
+from .redaction import redact, scrub, secret_env_values
 
 
 class ProviderError(ValueError):
@@ -688,9 +688,7 @@ class CommandProvider:
                 raise
             finally:
                 self._terminate(process)
-        # Never persist explicitly passed credentials echoed by a subprocess.
-        for value in secret_env_values(environment):
-            output = output.replace(value, REDACTED)
+        # Decode before scrubbing: raw replacement can invalidate JSON tokens.
         adapter_name = config.adapter or config.output_format
         adapter_cls = ADAPTERS[adapter_name]
         raw = output
@@ -722,8 +720,8 @@ class CommandProvider:
         safe_meta = scrub(reported_metadata(raw, adapter_name), secret_env_values(environment))
         for key in ("model", "usage", "cost", "request_id"):
             reported[key] = safe_meta.get(key)
-        if safe_meta.get("provider"):
-            reported["provider"] = safe_meta["provider"]
+        # An invalid provider identity must not retain the adapter's raw value.
+        reported["provider"] = safe_meta.get("provider")
         # Structured completions must remain parseable after secret removal.
         secrets = secret_env_values(environment)
         try:
