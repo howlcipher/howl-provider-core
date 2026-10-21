@@ -21,6 +21,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .redaction import REDACTED, secret_env_values
+
 
 class ProviderError(ValueError):
     """Sanitized failure carrying an optional execution record and recovery policy."""
@@ -684,11 +686,8 @@ class CommandProvider:
             finally:
                 self._terminate(process)
         # Never persist explicitly passed credentials echoed by a subprocess.
-        for key, value in environment.items():
-            if value and any(
-                marker in key.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")
-            ):
-                output = output.replace(value, "[REDACTED]")
+        for value in secret_env_values(environment):
+            output = output.replace(value, REDACTED)
         adapter_name = config.adapter or config.output_format
         adapter_cls = ADAPTERS[adapter_name]
         raw = output

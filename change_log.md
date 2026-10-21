@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+0.2.0: one set of secret-redaction rules for every component that persists text
+(issue #4). `redact(text, secrets=())`, `scrub(value, secrets=())` and
+`secret_env_values(environ)` are public; the patterns are the union of the
+copies in howldream, howlcreate and howlproof (adding AWS access keys and
+`github_pat_` tokens where they were missing). `CommandProvider` uses the same
+environment-secret rule it used inline before.
+
 Command semantic tests now allow two seconds of startup headroom. Separate timeout
 and cancellation tests prove child readiness and process cleanup; malformed JSON
 responses have explicit coverage. Production limits and policy are unchanged.
