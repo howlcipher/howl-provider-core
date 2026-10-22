@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .redaction import REDACTED, secret_env_values
+from .redaction import redact, scrub, secret_env_values
 
 
 class ProviderError(ValueError):
@@ -658,9 +658,12 @@ class CommandProvider:
                 if not output.strip():
                     raise ProviderError("command returned empty output")
             except ProviderError as error:
-                meta = reported_metadata(
-                    buffers["stdout"].decode("utf-8", errors="replace"),
-                    config.adapter or config.output_format,
+                meta = scrub(
+                    reported_metadata(
+                        buffers["stdout"].decode("utf-8", errors="replace"),
+                        config.adapter or config.output_format,
+                    ),
+                    secret_env_values(environment),
                 )
                 error.execution = Execution(
                     "command",
@@ -685,16 +688,14 @@ class CommandProvider:
                 raise
             finally:
                 self._terminate(process)
-        # Never persist explicitly passed credentials echoed by a subprocess.
-        for value in secret_env_values(environment):
-            output = output.replace(value, REDACTED)
+        # Decode before scrubbing: raw replacement can invalidate JSON tokens.
         adapter_name = config.adapter or config.output_format
         adapter_cls = ADAPTERS[adapter_name]
         raw = output
         try:
             output, reported = adapter_cls().decode(raw)
         except ProviderError as error:
-            meta = reported_metadata(raw, adapter_name)
+            meta = scrub(reported_metadata(raw, adapter_name), secret_env_values(environment))
             error.execution = Execution(
                 "command",
                 "command",
@@ -716,11 +717,21 @@ class CommandProvider:
                 provider=error.execution["actual_provider"], model=meta.get("model")
             )
             raise
-        safe_meta = reported_metadata(raw, adapter_name)
+        safe_meta = scrub(reported_metadata(raw, adapter_name), secret_env_values(environment))
         for key in ("model", "usage", "cost", "request_id"):
             reported[key] = safe_meta.get(key)
-        if safe_meta.get("provider"):
-            reported["provider"] = safe_meta["provider"]
+        # An invalid provider identity must not retain the adapter's raw value.
+        reported["provider"] = safe_meta.get("provider")
+        # Structured completions must remain parseable after secret removal.
+        secrets = secret_env_values(environment)
+        try:
+            value = json.loads(output)
+        except (ValueError, RecursionError):
+            output = redact(output, secrets)
+        else:
+            cleaned = scrub(value, secrets)
+            if cleaned != value:
+                output = json.dumps(cleaned)
         return output, Execution(
             "command",
             "command",
