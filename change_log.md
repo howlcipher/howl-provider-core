@@ -1,6 +1,6 @@
 # Change log
 
-## Unreleased
+## 0.2.1
 
 Mission 007 F2: restore optional bearer prefixes for all credential assignments
 and hyphenated GitHub tokens. Add historical Writer Google, Slack, JWT and
