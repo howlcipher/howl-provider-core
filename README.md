@@ -5,7 +5,9 @@ command transport, execution metadata, and invocation budgets. No discovery,
 model weights, services, SDKs, tools, or framework dependencies.
 
 `Policy()` forbids local inference by default. Explicit `Policy(allow_local=True)`
-is overridden by `HOWL_FORBID_LOCAL_INFERENCE=1` or `forbid_local=True`. Both
+is overridden by either `HOWL_FORBID_LOCAL_INFERENCE=1`,
+`FORBID_LOCAL_INFERENCE=1`, or `forbid_local=True`. A false alias never
+overrides an enabled prohibition. Both
 adapter selection and dispatch must check policy. `guarded_opener(policy)` disables
 proxies and redirects, validates DNS destinations, and connects to validated
 literal addresses while retaining hostname TLS authentication. Non-public IPs
