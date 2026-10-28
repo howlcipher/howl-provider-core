@@ -17,8 +17,11 @@ from howl_provider_core import (
 )
 
 
-def test_prohibition_overrides_permission(monkeypatch):
-    monkeypatch.setenv("HOWL_FORBID_LOCAL_INFERENCE", "1")
+@pytest.mark.parametrize("variable", ["HOWL_FORBID_LOCAL_INFERENCE", "FORBID_LOCAL_INFERENCE"])
+def test_prohibition_overrides_permission(monkeypatch, variable):
+    monkeypatch.delenv("HOWL_FORBID_LOCAL_INFERENCE", raising=False)
+    monkeypatch.delenv("FORBID_LOCAL_INFERENCE", raising=False)
+    monkeypatch.setenv(variable, "1")
     policy = Policy(allow_local=True)
     with pytest.raises(ProviderError):
         policy.check_provider("ollama")
@@ -32,6 +35,26 @@ def test_prohibition_overrides_permission(monkeypatch):
     ]:
         with pytest.raises(ProviderError):
             policy.check_url(url)
+
+
+@pytest.mark.parametrize("variable", ["HOWL_FORBID_LOCAL_INFERENCE", "FORBID_LOCAL_INFERENCE"])
+def test_false_alias_cannot_override_prohibition(monkeypatch, variable):
+    for name in ["HOWL_FORBID_LOCAL_INFERENCE", "FORBID_LOCAL_INFERENCE"]:
+        monkeypatch.setenv(name, "1" if name == variable else "0")
+    assert not Policy(allow_local=True).local_allowed()
+
+
+def test_explicit_permission_without_prohibition(monkeypatch):
+    monkeypatch.delenv("HOWL_FORBID_LOCAL_INFERENCE", raising=False)
+    monkeypatch.delenv("FORBID_LOCAL_INFERENCE", raising=False)
+    assert Policy(allow_local=True).local_allowed()
+
+
+def test_invalid_generic_prohibition_fails_closed(monkeypatch):
+    monkeypatch.delenv("HOWL_FORBID_LOCAL_INFERENCE", raising=False)
+    monkeypatch.setenv("FORBID_LOCAL_INFERENCE", "invalid")
+    with pytest.raises(ProviderError, match="invalid boolean policy variable"):
+        Policy(allow_local=True).check_provider("ollama")
 
 
 def test_dns_blocked_before_connection():

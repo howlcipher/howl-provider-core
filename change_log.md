@@ -1,5 +1,12 @@
 # Change log
 
+## Unreleased
+
+Honor the ecosystem's `FORBID_LOCAL_INFERENCE` environment variable alongside
+`HOWL_FORBID_LOCAL_INFERENCE`. Either prohibition overrides explicit local opt-in;
+an invalid generic value fails closed. Regression tests exercise both aliases
+without dispatching inference.
+
 ## 0.2.1
 
 Mission 007 F2: restore optional bearer prefixes for all credential assignments
