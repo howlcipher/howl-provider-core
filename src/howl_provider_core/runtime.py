@@ -170,7 +170,10 @@ class Policy:
 
     def local_allowed(self) -> bool:
         return (
-            self.allow_local and not self.forbid_local and not _flag("HOWL_FORBID_LOCAL_INFERENCE")
+            self.allow_local
+            and not self.forbid_local
+            and not _flag("HOWL_FORBID_LOCAL_INFERENCE")
+            and not _flag("FORBID_LOCAL_INFERENCE")
         )
 
     def check_provider(self, provider: str) -> None:
